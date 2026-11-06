@@ -47,22 +47,23 @@ internal sealed class PowerShellRunner
         process.StandardInput.Close();
 
         await process.WaitForExitAsync(cancellationToken);
-        var result = await outputTask;
+        var workerOutput = await outputTask;
         await errorTask;
         if (process.ExitCode != 0)
         {
-            throw new InvalidOperationException($"PowerShell worker exited with code {process.ExitCode}.");
+            throw new InvalidOperationException(workerOutput.Error ?? $"PowerShell worker exited with code {process.ExitCode}.");
         }
 
-        return result;
+        return workerOutput.Result;
     }
 
-    private static async Task<JsonElement?> ReadOutputAsync(
+    private static async Task<WorkerOutput> ReadOutputAsync(
         StreamReader reader,
         Action<string> onLog,
         CancellationToken cancellationToken)
     {
         JsonElement? result = null;
+        string? error = null;
         while (await reader.ReadLineAsync(cancellationToken) is { } line)
         {
             try
@@ -74,9 +75,18 @@ internal sealed class PowerShellRunner
                 {
                     onLog(root.GetProperty("message").GetString() ?? string.Empty);
                 }
-                else if (type == "result" && root.TryGetProperty("data", out var data))
+                else if (type == "error")
                 {
-                    result = data.Clone();
+                    error = root.GetProperty("message").GetString();
+                    onLog($"ERROR: {error}");
+                }
+                else if (type == "result")
+                {
+                    if (root.TryGetProperty("data", out var data))
+                    {
+                        result = data.Clone();
+                    }
+                    onLog(root.GetProperty("message").GetString() ?? "Worker operation completed.");
                 }
             }
             catch (JsonException)
@@ -85,7 +95,7 @@ internal sealed class PowerShellRunner
             }
         }
 
-        return result;
+        return new WorkerOutput(result, error);
     }
 
     private static async Task ReadErrorsAsync(
@@ -107,6 +117,8 @@ internal sealed class PowerShellRunner
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
     }
+
+    private sealed record WorkerOutput(JsonElement? Result, string? Error);
 }
 
 internal sealed class WorkerRequest
@@ -138,9 +150,39 @@ internal sealed class InstalledPackage
     [JsonPropertyName("packageFamilyName")]
     public string PackageFamilyName { get; init; } = string.Empty;
 
+    [JsonPropertyName("publisher")]
+    public string Publisher { get; init; } = string.Empty;
+
+    [JsonPropertyName("version")]
+    public string Version { get; init; } = string.Empty;
+
+    [JsonPropertyName("installLocation")]
+    public string InstallLocation { get; init; } = string.Empty;
+
+    [JsonPropertyName("userScope")]
+    public string UserScope { get; init; } = string.Empty;
+
+    [JsonPropertyName("state")]
+    public string State { get; init; } = string.Empty;
+
+    [JsonPropertyName("isInstalled")]
+    public bool IsInstalled { get; init; }
+
+    [JsonPropertyName("isProvisioned")]
+    public bool IsProvisioned { get; init; }
+
     [JsonPropertyName("isFramework")]
     public bool IsFramework { get; init; }
 
     [JsonPropertyName("nonRemovable")]
     public bool NonRemovable { get; init; }
 }
+
+internal sealed class UserSettings
+{
+    public Dictionary<string, string[]> CategoryFilters { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<string, string[]> SelectionProfiles { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+internal sealed record HistoryEntry(DateTimeOffset Timestamp, string Message);
